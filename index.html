@@ -43,7 +43,6 @@ button{font-family:inherit;}
 /* ===================== SAVE STATUS + STORAGE WARNING ===================== */
 .brand-strip-right .live-dot.saving{background:#E8CD6F; box-shadow:0 0 0 3px rgba(232,205,111,0.25);}
 .brand-strip-right .live-dot.error{background:#E4685C; box-shadow:0 0 0 3px rgba(228,104,92,0.25);}
-.brand-strip-right .live-dot.offline{background:#A8A296; box-shadow:0 0 0 3px rgba(168,162,150,0.25);}
 .storage-warning{display:none; background:var(--red-bg); color:var(--red); border-bottom:1px solid #E9C5BE; padding:9px 22px; font-size:12.5px; text-align:center; position:sticky; top:41px; z-index:65;}
 .storage-warning.show{display:block;}
 .storage-warning b{font-weight:700;}
@@ -4796,34 +4795,20 @@ wireImportZone("importZoneOrders", "importFileOrders", "orders");
 wireImportZone("importZoneReturns", "importFileReturns", "returns");
 wireImportZone("importZonePayments", "importFilePayments", "payments");
 
-/* ===================== SHARED BACKEND + LOCAL PERSISTENCE =====================
+/* ===================== LOCAL PERSISTENCE (autosave to this browser) =====================
    Everything you fill in or upload — orders, inventory, raw materials, listings, packing
-   costs, returns, payments, business profile (incl. bank details), and the import history —
-   is saved into this browser's local storage AND pushed to a shared Google Sheets backend
-   (via Apps Script), so anyone who opens the link sees the same live data.
-
-   ACCESS MODEL (by design, chosen for simplicity):
-   - Anyone with the page link AND the backend URL below can read AND edit all shared data.
-   - There is no login and no per-field restriction — the Business Profile page, including
-     bank account details, is part of the same shared blob as everything else.
-   - In effect, the Apps Script Web App URL below is the only thing standing between this
-     data and anyone who has it. Don't post the deployed page or this file's source publicly.
-   - If BACKEND_URL is left as the placeholder, the app silently falls back to this-device-only
-     local storage (old behaviour) — nothing breaks, it just won't be shared.
+   costs, returns, payments, and the import history — is saved into this browser's local
+   storage. It survives a refresh, closing the tab, and restarting the browser, because it's
+   written to disk by the browser itself, not just held in memory.
    Notes:
-   - Local storage is still used as an instant local cache / offline fallback.
-   - Private/incognito windows, or a browser with storage disabled/full, can block local
-     caching — a warning banner appears at the top so you know to keep the tab open.
-   - "Reset to sample data" (in the Add Order screen) discards saved data and restores the
-     original demo numbers — it does not read from local storage or the shared backend. */
+   - Data is tied to THIS browser on THIS device. Opening the file in a different browser
+     (or a different device) starts from the built-in sample data, since local storage
+     never leaves the browser it was saved in.
+   - Private/incognito windows, or a browser with storage disabled/full, can block this —
+     in that case a warning banner appears at the top so you know to keep the tab open.
+   - "Reset to sample data" (in the Add Order screen) discards your saved data and restores
+     the original demo numbers — it does not read from local storage. */
 const STORAGE_KEY = "akmr_trade_point_data_v1";
-
-// Paste the Apps Script Web App URL here after deploying Code.gs (see setup notes in that file).
-const BACKEND_URL = "https://script.google.com/macros/s/AKfycbyhX5DMnWBiGbhDsQ40Rfa78YHyt8RydrPHKXwIqa9q6MExX9ED7KmUMXU0r-tnMhUiBA/exec";
-const REMOTE_CONFIGURED = !!BACKEND_URL && !BACKEND_URL.includes("PASTE_YOUR");
-const POLL_MS = 8000;   // how often to check the shared backend for changes made elsewhere
-const PUSH_DEBOUNCE_MS = 900; // wait this long after the last edit before pushing
-
 /* One-time cleanup: earlier versions of this file shipped with 5 sample orders baked in, and
    because autosave ran on first load, some browsers already saved those into local storage.
    If we ever find these exact IDs sitting untouched (no import/payment source of their own),
@@ -4837,11 +4822,10 @@ function setSaveStatus(state){
   const dot = document.getElementById("saveStatusDot");
   const text = document.getElementById("saveStatusText");
   if(!dot || !text) return;
-  dot.classList.remove("saving","error","offline");
-  if(state==="saving"){ dot.classList.add("saving"); text.textContent = "Syncing…"; }
-  else if(state==="error"){ dot.classList.add("error"); text.textContent = "Sync failed — saved on this device"; }
-  else if(state==="offline"){ dot.classList.add("offline"); text.textContent = REMOTE_CONFIGURED ? "Offline — saved on this device" : "Saved on this device only"; }
-  else { text.textContent = REMOTE_CONFIGURED ? "Synced for everyone" : "All changes saved"; }
+  dot.classList.remove("saving","error");
+  if(state==="saving"){ dot.classList.add("saving"); text.textContent = "Saving…"; }
+  else if(state==="error"){ dot.classList.add("error"); text.textContent = "Not saved"; }
+  else { text.textContent = "All changes saved"; }
 }
 
 function showStorageWarning(show){
@@ -4867,44 +4851,13 @@ function collectPersistedState(){
   };
 }
 
-/* Applies a previously-saved state object (from local storage OR the shared backend) onto
-   the in-memory app variables. Shared by loadPersistedState() and remote pulls. */
-function applyPersistedData(data){
-  if(Array.isArray(data.inventory)) inventory = data.inventory;
-  if(typeof data.nextInvId==="number") nextInvId = data.nextInvId;
-  if(Array.isArray(data.rawMaterials)){ rawMaterials.length = 0; rawMaterials.push(...data.rawMaterials); }
-  if(typeof data.nextRawId==="number") nextRawId = data.nextRawId;
-  if(data.packingCosts && typeof data.packingCosts==="object") packingCosts = data.packingCosts;
-  if(Array.isArray(data.listing)) listing = data.listing;
-  if(typeof data.nextListingId==="number") nextListingId = data.nextListingId;
-  if(Array.isArray(data.expenses)) expenses = data.expenses;
-  if(data.businessProfile && typeof data.businessProfile==="object") businessProfile = data.businessProfile;
-  if(typeof data.bankNumberRevealed==="boolean") bankNumberRevealed = data.bankNumberRevealed;
-  if(Array.isArray(data.orders)){
-    orders = data.orders.filter(o=> !(o && LEGACY_DEMO_ORDER_IDS.has(o.id) && !o.source && !o.paymentSource));
-  }
-  if(Array.isArray(data.returnRecords)) returnRecords = data.returnRecords;
-  if(Array.isArray(data.importLog)) importLog = data.importLog;
-  if(typeof data.importLogSeq==="number") importLogSeq = data.importLogSeq;
-  if(typeof data.seenOrdersCount==="number") seenOrdersCount = data.seenOrdersCount;
-  if(Array.isArray(data.seenLowStockIds)) seenLowStockIds = new Set(data.seenLowStockIds);
-  if(typeof data.defaultWeightBucketIdx==="number") defaultWeightBucketIdx = data.defaultWeightBucketIdx;
-  inventory.forEach(recomputeInvFields);
-  rebuildPriceBook();
-}
-
 let _lastSavedJSON = null;
 let _suspendAutosave = false;
-let _pushTimer = null;
-let _lastPushedSavedAt = null;   // savedAt of the last write WE successfully sent
-let _lastKnownRemoteSavedAt = null; // savedAt of the last data we know is on the backend (ours or someone else's)
-
 function persistState(){
   if(_suspendAutosave) return;
-  const state = collectPersistedState();
   let json;
   try{
-    json = JSON.stringify(state);
+    json = JSON.stringify(collectPersistedState());
   }catch(err){
     console.error("Darvi Essence: could not prepare data for saving.", err);
     setSaveStatus("error");
@@ -4914,87 +4867,12 @@ function persistState(){
   try{
     localStorage.setItem(STORAGE_KEY, json);
     _lastSavedJSON = json;
+    setSaveStatus("saved");
     showStorageWarning(false);
   }catch(err){
     console.error("Darvi Essence: could not save to this browser's storage — is it private/incognito mode, or full?", err);
     setSaveStatus("error");
     showStorageWarning(true);
-    return;
-  }
-  queueRemotePush(state);
-}
-
-function queueRemotePush(state){
-  if(!REMOTE_CONFIGURED){ setSaveStatus("offline"); return; }
-  setSaveStatus("saving");
-  clearTimeout(_pushTimer);
-  _pushTimer = setTimeout(()=> pushToBackend(state), PUSH_DEBOUNCE_MS);
-}
-
-// Sends state immediately (no debounce) — used on tab close so we don't lose the last edit.
-function flushRemotePushSync(){
-  if(!REMOTE_CONFIGURED) return;
-  clearTimeout(_pushTimer);
-  try{
-    const state = JSON.parse(_lastSavedJSON || "null");
-    if(!state) return;
-    const body = JSON.stringify({ savedAt: state.savedAt, data: state });
-    if(navigator.sendBeacon){
-      navigator.sendBeacon(BACKEND_URL, new Blob([body], {type:"text/plain;charset=utf-8"}));
-    }
-  }catch(err){ /* best-effort only */ }
-}
-
-async function pushToBackend(state){
-  try{
-    const res = await fetch(BACKEND_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" }, // keeps this a CORS "simple request"
-      body: JSON.stringify({ savedAt: state.savedAt, data: state })
-    });
-    const out = await res.json().catch(()=>null);
-    if(out && out.ok){
-      _lastPushedSavedAt = out.savedAt;
-      _lastKnownRemoteSavedAt = out.savedAt;
-      setSaveStatus("saved");
-    }else if(out && out.reason === "stale"){
-      // Someone else saved something newer in the meantime — pull it in instead of losing it.
-      setSaveStatus("saved");
-      await pullFromBackend(true);
-    }else{
-      setSaveStatus("error");
-    }
-  }catch(err){
-    console.error("Darvi Essence: could not reach the shared backend — data is still saved on this device.", err);
-    setSaveStatus("error");
-  }
-}
-
-// force=true bypasses the "don't interrupt an open modal" guard (used right after our own push loses a race).
-async function pullFromBackend(force){
-  if(!REMOTE_CONFIGURED) return false;
-  if(!force && document.querySelector(".modal-overlay.show")) return false; // don't yank a form mid-edit
-  try{
-    const res = await fetch(BACKEND_URL + "?t=" + Date.now());
-    const out = await res.json();
-    if(!out || !out.data || !out.savedAt) return false;
-    if(out.savedAt === _lastKnownRemoteSavedAt) return false; // nothing new
-    if(_lastPushedSavedAt && out.savedAt <= _lastPushedSavedAt) return false; // we're already the latest
-    _lastKnownRemoteSavedAt = out.savedAt;
-    _suspendAutosave = true;
-    try{
-      applyPersistedData(out.data);
-      _lastSavedJSON = JSON.stringify(collectPersistedState());
-      try{ localStorage.setItem(STORAGE_KEY, _lastSavedJSON); }catch(err){}
-    } finally {
-      _suspendAutosave = false;
-    }
-    renderAll();
-    setSaveStatus("saved");
-    return true;
-  }catch(err){
-    console.error("Darvi Essence: could not check the shared backend for updates.", err);
-    return false;
   }
 }
 
@@ -5007,39 +4885,33 @@ function loadPersistedState(){
   try{ data = JSON.parse(raw); }
   catch(err){ console.error("Darvi Essence: saved data looked corrupted, starting from the built-in sample data instead.", err); return false; }
   try{
-    applyPersistedData(data);
+    if(Array.isArray(data.inventory)) inventory = data.inventory;
+    if(typeof data.nextInvId==="number") nextInvId = data.nextInvId;
+    if(Array.isArray(data.rawMaterials)){ rawMaterials.length = 0; rawMaterials.push(...data.rawMaterials); }
+    if(typeof data.nextRawId==="number") nextRawId = data.nextRawId;
+    if(data.packingCosts && typeof data.packingCosts==="object") packingCosts = data.packingCosts;
+    if(Array.isArray(data.listing)) listing = data.listing;
+    if(typeof data.nextListingId==="number") nextListingId = data.nextListingId;
+    if(Array.isArray(data.expenses)) expenses = data.expenses;
+    if(data.businessProfile && typeof data.businessProfile==="object") businessProfile = data.businessProfile;
+    if(typeof data.bankNumberRevealed==="boolean") bankNumberRevealed = data.bankNumberRevealed;
+    if(Array.isArray(data.orders)){
+      orders = data.orders.filter(o=> !(o && LEGACY_DEMO_ORDER_IDS.has(o.id) && !o.source && !o.paymentSource));
+    }
+    if(Array.isArray(data.returnRecords)) returnRecords = data.returnRecords;
+    if(Array.isArray(data.importLog)) importLog = data.importLog;
+    if(typeof data.importLogSeq==="number") importLogSeq = data.importLogSeq;
+    if(typeof data.seenOrdersCount==="number") seenOrdersCount = data.seenOrdersCount;
+    if(Array.isArray(data.seenLowStockIds)) seenLowStockIds = new Set(data.seenLowStockIds);
+    if(typeof data.defaultWeightBucketIdx==="number") defaultWeightBucketIdx = data.defaultWeightBucketIdx;
+    inventory.forEach(recomputeInvFields);
+    rebuildPriceBook();
     _lastSavedJSON = raw;
     return true;
   }catch(err){
     console.error("Darvi Essence: problem applying your saved data — starting from the built-in sample data instead.", err);
     return false;
   }
-}
-
-// On startup, check the shared backend once and use it if it's ahead of what's on this device
-// (e.g. someone else added orders from their own browser since this device last opened the page).
-async function syncFromBackendOnLoad(){
-  if(!REMOTE_CONFIGURED){ setSaveStatus("offline"); return; }
-  try{
-    const res = await fetch(BACKEND_URL + "?t=" + Date.now());
-    const out = await res.json();
-    if(out && out.data && out.savedAt){
-      const localSavedAt = _lastSavedJSON ? (JSON.parse(_lastSavedJSON).savedAt || "") : "";
-      if(!localSavedAt || out.savedAt > localSavedAt){
-        applyPersistedData(out.data);
-        _lastSavedJSON = JSON.stringify(collectPersistedState());
-        try{ localStorage.setItem(STORAGE_KEY, _lastSavedJSON); }catch(err){}
-      }
-      _lastKnownRemoteSavedAt = out.savedAt;
-      _lastPushedSavedAt = out.savedAt;
-    }
-    setSaveStatus("saved");
-  }catch(err){
-    console.error("Darvi Essence: could not reach the shared backend on startup — showing this device's saved data.", err);
-    setSaveStatus("error");
-  }
-  renderAll();
-  setInterval(()=> pullFromBackend(false), POLL_MS);
 }
 
 /* ===================== RENDER ALL ===================== */
@@ -5061,13 +4933,9 @@ function renderAll(){
 loadPersistedState();
 populateProductSelect();
 renderAll();
-syncFromBackendOnLoad();
-window.addEventListener("beforeunload", ()=>{ persistState(); flushRemotePushSync(); });
-window.addEventListener("pagehide", ()=>{ persistState(); flushRemotePushSync(); });
-document.addEventListener("visibilitychange", ()=>{
-  if(document.hidden){ persistState(); flushRemotePushSync(); }
-  else { pullFromBackend(false); }
-});
+window.addEventListener("beforeunload", persistState);
+window.addEventListener("pagehide", persistState);
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden) persistState(); });
 setInterval(persistState, 12000);
 </script>
 
